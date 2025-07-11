@@ -11,6 +11,8 @@ from selenium import webdriver
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from random import shuffle
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 
 
 from os.path import join, dirname
@@ -32,6 +34,11 @@ JOBS_TO_CONNECT_WITH = ['CEO', 'CTO', 'Developer', 'HR', 'Recruiter']
 ENDORSE_CONNECTIONS = False
 RANDOMIZE_ENDORSING_CONNECTIONS = True
 VERBOSE = True
+
+# Configurable Output Fields (comma-separated, e.g., 'name,email,phone')
+OUTPUT_FIELDS = os.getenv("OUTPUT_FIELDS", 'url,name,connection_degree,country,email,phone')
+MAX_PROFILE_VIEWS = int(os.getenv("MAX_PROFILE_VIEWS", 1000))
+PROFILE_DATA_DIR = 'profile_data'
 
 
 def Launch():
@@ -72,7 +79,7 @@ def StartBrowser(browserChoice):
 
     if browserChoice == 1:
         print('\nLaunching Chrome')
-        browser = webdriver.Chrome(ChromeDriverManager().install())
+        browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
 
     elif browserChoice == 2:
         print('\nLaunching Firefox/Iceweasel')
@@ -84,14 +91,21 @@ def StartBrowser(browserChoice):
 
     # Sign in
     browser.get('https://linkedin.com/uas/login')
-    emailElement = browser.find_element_by_id('username')
+    emailElement = browser.find_element(By.ID, 'username')
     emailElement.send_keys(EMAIL)
-    passElement = browser.find_element_by_id('password')
+    passElement = browser.find_element(By.ID, 'password')
     passElement.send_keys(PASSWORD)
     passElement.submit()
 
     print('Signing in...')
     time.sleep(3)
+
+    # Extract own profile URL after login
+    browser.get('https://www.linkedin.com/feed/')
+    time.sleep(2)
+    soup = BeautifulSoup(browser.page_source, "html.parser")
+    own_profile_url = extract_own_profile_url(soup)
+    print(f"Your profile URL: {own_profile_url}")
 
     soup = BeautifulSoup(browser.page_source, "html.parser")
     if soup.find('div', {'class': 'alert error'}):
@@ -102,121 +116,68 @@ def StartBrowser(browserChoice):
         browser.quit()
     else:
         print('Success!\n')
-        LinkedInBot(browser)
+        LinkedInBot(browser, own_profile_url)
 
 
-def LinkedInBot(browser):
+def LinkedInBot(browser, own_profile_url):
     """
     Run the LinkedIn Bot.
     browser: the selenium driver to run the bot with.
+    own_profile_url: the user's own profile URL to skip.
     """
-
-    T = 0
-    V = 0
-    profilesQueued = []
-    error403Count = 0
-    timer = time.time()
-
-    if ENDORSE_CONNECTIONS:
-        EndorseConnections(browser)
-
-    print('At the my network page to scrape user urls..\n')
-
-    # Infinite loop
-    while True:
-
-        # Generate random IDs
-        while True:
-
-            NavigateToMyNetworkPage(browser)
-            T += 1
-
-            if GetNewProfileURLS(BeautifulSoup(browser.page_source, "html.parser"), profilesQueued):
-                break
-            else:
-                print('|'),
-                time.sleep(random.uniform(5, 7))
-
-        soup = BeautifulSoup(browser.page_source, "html.parser")
-        profilesQueued = list(set(GetNewProfileURLS(soup, profilesQueued)))
-
-        V += 1
-        print('\n\nGot our users to start viewing with!\n')
-        print(browser.title.replace(' | LinkedIn', ''), ' visited. T:',
-              T, '| V:', V, '| Q:', len(profilesQueued))
-
-        while profilesQueued:
-
-            shuffle(profilesQueued)
-            profileID = profilesQueued.pop()
-            browser.get('https://www.linkedin.com'+profileID)
-
-            # Connect with users if the flag is turned on and matches your criteria
-            if CONNECT_WITH_USERS:
-                if not RANDOMIZE_CONNECTING_WITH_USERS:
-                    ConnectWithUser(browser)
-                elif random.choice([True, False]):
-                    ConnectWithUser(browser)
-
-            # Add the ID to the visitedUsersFile
-            with open('visitedUsers.txt', 'a') as visitedUsersFile:
-                visitedUsersFile.write(str(profileID)+'\r\n')
-            visitedUsersFile.close()
-
-            # Get new profiles ID
-            time.sleep(10)
+    import csv
+    import os
+    from datetime import datetime
+    if not os.path.exists(PROFILE_DATA_DIR):
+        os.makedirs(PROFILE_DATA_DIR)
+    visited_profiles = set()
+    error_log_path = 'errorLog.csv'
+    # Write error log header if not exists
+    if not os.path.exists(error_log_path):
+        with open(error_log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'error'])
+    print('At the home page to scrape user urls..\n')
+    while len(visited_profiles) < MAX_PROFILE_VIEWS:
+        try:
+            NavigateToHomePage(browser)
+            time.sleep(2)
             soup = BeautifulSoup(browser.page_source, "html.parser")
-            profilesQueued.extend(GetNewProfileURLS(soup, profilesQueued))
-            profilesQueued = list(set(profilesQueued))
-
-            browserTitle = (browser.title).encode(
-                'ascii', 'ignore').replace(b'  ', b' ')
-
-            # 403 error
-            if browserTitle == '403: Forbidden':
-                error403Count += 1
-                print('\nLinkedIn is momentarily unavailable - Paused for',
-                      str(error403Count), 'hour(s)\n')
-                time.sleep(3600*error403Count+(random.randrange(0, 10))*60)
-                timer = time.time()  # Reset the timer
-
-            # User out of network
-            elif browserTitle == 'Profile | LinkedIn':
-                T += 1
-                error403Count = 0
-                print('User not in your network. T:', T,
-                      '| V:', V, '| Q:', len(profilesQueued))
-
-            # User in network
-            else:
-                T += 1
-                V += 1
-                error403Count = 0
-                print(browserTitle.replace(b' | LinkedIn', b''),
-                      'visited. T:', T, '| V:', V, '| Q:', len(profilesQueued))
-
-            # Pause
-            if (T % 1000 == 0) or time.time()-timer > 3600:
-                print('\nPaused for 1 hour\n')
-                time.sleep(3600+(random.randrange(0, 10))*60)
-                timer = time.time()  # Reset the timer
-            else:
-                # Otherwise, sleep to make sure everything loads
-                time.sleep(random.uniform(5, 7))
-
-        print('\nNo more profiles to visit. Everything restarts with the network page...\n')
+            profile_links = extract_home_feed_profile_links(soup)
+            new_profiles = [link for link in profile_links if link not in visited_profiles and link != own_profile_url]
+            if not new_profiles:
+                ScrollToBottomAndWaitForLoad(browser)
+                continue
+            for profile_url in new_profiles:
+                if len(visited_profiles) >= MAX_PROFILE_VIEWS:
+                    print(f"Reached {MAX_PROFILE_VIEWS} profile views. Exiting gracefully.")
+                    return
+                print(f"Visiting profile: {profile_url}")
+                visited_profiles.add(profile_url)
+                browser.get('https://www.linkedin.com' + profile_url)
+                time.sleep(random.uniform(2, 3))
+                # Extract and save profile data
+                profile_soup = BeautifulSoup(browser.page_source, "html.parser")
+                profile_data = extract_profile_data(profile_url, profile_soup)
+                save_profile_data(profile_data)
+                browser.back()
+                time.sleep(2)
+            ScrollToBottomAndWaitForLoad(browser)
+            print(f"Visited {len(visited_profiles)} unique profiles this session.")
+        except Exception as e:
+            with open(error_log_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([datetime.now().isoformat(), str(e)])
+            print(f"Error occurred: {e}. Logged to {error_log_path}")
+    print(f"Graceful shutdown after visiting {MAX_PROFILE_VIEWS} profiles.")
 
 
-def NavigateToMyNetworkPage(browser):
+def NavigateToHomePage(browser):
     """
-    Navigate to the my network page and scroll to the bottom and let the lazy loading
-    go to be able to grab more potential users in your network. It is reccommended to
-    increase the NUM_LAZY_LOAD_ON_MY_NETWORK_PAGE value if you are using the variable
-    SPECIFIC_USERS_TO_VIEW.
+    Navigate to the LinkedIn home page and scroll to the bottom to load more content.
     browser: the selenium browser used to interact with the page.
     """
-
-    browser.get('https://www.linkedin.com/mynetwork/')
+    browser.get('https://www.linkedin.com/feed/')
     for counter in range(1, NUM_LAZY_LOAD_ON_MY_NETWORK_PAGE):
         ScrollToBottomAndWaitForLoad(browser)
 
@@ -244,10 +205,10 @@ def ConnectWithUser(browser):
             if VERBOSE:
                 print('Sending the user an invitation to connect.')
                 # old class = connect primary top-card-action ember-view
-                browser.find_element_by_xpath(
+                browser.find_element(By.XPATH,
                     '//button[@class="pv-s-profile-actions pv-s-profile-actions--connect ml2 artdeco-button artdeco-button--2 artdeco-button--primary ember-view"]').click()
                 time.sleep(random.randrange(3))
-                browser.find_element_by_xpath(
+                browser.find_element(By.XPATH,
                     '//button[@class="ml1 artdeco-button artdeco-button--3 artdeco-button--primary ember-view"]').click()
         except:
             pass
@@ -450,6 +411,73 @@ def ScrollToBottomAndWaitForLoad(browser):
 
     browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(4)
+
+
+def extract_home_feed_profile_links(soup):
+    """
+    Extract unique user profile links from the LinkedIn home feed.
+    """
+    profile_links = set()
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if href.startswith('/in/') and '?' not in href:
+            profile_links.add(href)
+    return list(profile_links)
+
+
+def extract_own_profile_url(soup):
+    """
+    Extract the user's own profile URL from the LinkedIn home page soup.
+    """
+    # Look for the 'Me' link in the top nav
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if href.startswith('/in/') and 'mini-profile' in str(a.get('class', '')):
+            return href
+    # Fallback: first /in/ link
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if href.startswith('/in/'):
+            return href
+    return None
+
+
+def extract_profile_data(profile_url, soup):
+    """
+    Extract profile data fields as specified in OUTPUT_FIELDS.
+    """
+    data = {'url': 'https://www.linkedin.com' + profile_url}
+    if 'name' in OUTPUT_FIELDS:
+        name_tag = soup.find('h1')
+        data['name'] = name_tag.get_text(strip=True) if name_tag else 'N/A'
+    if 'connection_degree' in OUTPUT_FIELDS:
+        # Look for 1st, 2nd, 3rd, etc. near the top of the profile
+        degree_tag = soup.find(lambda tag: tag.name in ['span', 'div'] and tag.get_text(strip=True) in ['1st', '2nd', '3rd', '4th'])
+        data['connection_degree'] = degree_tag.get_text(strip=True) if degree_tag else 'N/A'
+    if 'country' in OUTPUT_FIELDS:
+        # Look for location, usually in a span or li near the top
+        country_tag = soup.find(lambda tag: tag.name in ['span', 'li'] and (',' in tag.get_text(strip=True) or 'United' in tag.get_text(strip=True)))
+        data['country'] = country_tag.get_text(strip=True) if country_tag else 'N/A'
+    if 'email' in OUTPUT_FIELDS:
+        data['email'] = 'N/A'  # Email is not public on most profiles
+    if 'phone' in OUTPUT_FIELDS:
+        data['phone'] = 'N/A'  # Phone is not public on most profiles
+    return data
+
+
+def save_profile_data(profile_data):
+    """
+    Save profile data to a CSV file in the profile_data directory.
+    """
+    import csv
+    import os
+    file_path = os.path.join(PROFILE_DATA_DIR, 'profiles.csv')
+    file_exists = os.path.isfile(file_path)
+    with open(file_path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=profile_data.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(profile_data)
 
 
 if __name__ == '__main__':

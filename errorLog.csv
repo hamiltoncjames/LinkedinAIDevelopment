@@ -1,0 +1,2 @@
+timestamp,error
+2025-07-12T04:00:38.826829,"HTTPConnectionPool(host='localhost', port=57775): Read timed out. (read timeout=120)"
