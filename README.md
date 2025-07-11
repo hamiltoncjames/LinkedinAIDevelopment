@@ -84,3 +84,14 @@ Just to push more knowledege a judge in California ruled that they cannot prohib
 I have sparily modified this project over the past few years. Others have taken upon themselves to leverage this as a base and work off of it from here. As I learn more about other's work using this I will link their projects here:
 
 * [@SethRzeszutek's](https://github.com/SethRzeszutek) https://github.com/SethRzeszutek/LinkedIn-Bot
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Attribution
+
+This project is inspired by [OriginalProjectName](https://github.com/originalowner/originalrepo) by [Original Author], used under the MIT License.
+Significant improvements and new features by [hamiltoncjames](https://github.com/hamiltoncjames) and [KGFliight](https://github.com/KGFliight).
+
+This is not a true fork, but is based on the original project as inspiration.
