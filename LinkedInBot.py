@@ -6,8 +6,10 @@ import os
 import random
 import sys
 import time
+import signal
 from urllib.parse import urlparse
 from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from random import shuffle
@@ -36,9 +38,32 @@ RANDOMIZE_ENDORSING_CONNECTIONS = True
 VERBOSE = True
 
 # Configurable Output Fields (comma-separated, e.g., 'name,email,phone')
-OUTPUT_FIELDS = os.getenv("OUTPUT_FIELDS", 'url,name,connection_degree,country,email,phone')
+OUTPUT_FIELDS = os.getenv("OUTPUT_FIELDS", 'url,name,connection_degree,country,email,phone,timestamp')
 MAX_PROFILE_VIEWS = int(os.getenv("MAX_PROFILE_VIEWS", 1000))
 PROFILE_DATA_DIR = 'profile_data'
+
+# Global variables for graceful shutdown
+visited_profiles = set()
+last_profile_visit_time = time.time()
+browser = None
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global shutdown_requested
+    print("\n\nShutdown requested. Saving progress and exiting gracefully...")
+    shutdown_requested = True
+    if browser:
+        browser.quit()
+    print(f"Total profiles visited: {len(visited_profiles)}")
+    print("Graceful shutdown complete.")
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 def Launch():
@@ -73,21 +98,36 @@ def Launch():
 
 def StartBrowser(browserChoice):
     """
-    Launch broswer based on the user's selected choice.
+    Launch browser based on the user's selected choice.
     browserChoice: the browser selected by the user.
     """
+    global browser
 
     if browserChoice == 1:
         print('\nLaunching Chrome')
-        browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        chrome_options = Options()
+        chrome_options.add_argument('--log-level=3')  # Suppress console logging
+        chrome_options.add_argument('--silent')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
     elif browserChoice == 2:
         print('\nLaunching Firefox/Iceweasel')
         browser = webdriver.Firefox()
 
     elif browserChoice == 3:
-        print('\nLaunching PhantomJS')
-        browser = webdriver.PhantomJS()
+        print('\nPhantomJS is no longer supported. Falling back to Chrome...')
+        chrome_options = Options()
+        chrome_options.add_argument('--log-level=3')
+        chrome_options.add_argument('--silent')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
+    if browser is None:
+        print("Failed to initialize browser. Exiting.")
+        return
 
     # Sign in
     browser.get('https://linkedin.com/uas/login')
@@ -119,57 +159,131 @@ def StartBrowser(browserChoice):
         LinkedInBot(browser, own_profile_url)
 
 
-def LinkedInBot(browser, own_profile_url):
+def LinkedInBot(browser_instance, own_profile_url):
     """
     Run the LinkedIn Bot.
-    browser: the selenium driver to run the bot with.
+    browser_instance: the selenium driver to run the bot with.
     own_profile_url: the user's own profile URL to skip.
     """
+    global visited_profiles, last_profile_visit_time, browser, shutdown_requested
+    browser = browser_instance
+    
     import csv
     import os
     from datetime import datetime
+    
     if not os.path.exists(PROFILE_DATA_DIR):
         os.makedirs(PROFILE_DATA_DIR)
-    visited_profiles = set()
+    
     error_log_path = 'errorLog.csv'
     # Write error log header if not exists
     if not os.path.exists(error_log_path):
         with open(error_log_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['timestamp', 'error'])
+    
     print('At the home page to scrape user urls..\n')
-    while len(visited_profiles) < MAX_PROFILE_VIEWS:
+    
+    consecutive_no_profiles = 0
+    last_profile_count = 0
+    
+    while len(visited_profiles) < MAX_PROFILE_VIEWS and not shutdown_requested:
         try:
+            # Check for stuck condition
+            if is_stuck(consecutive_no_profiles, last_profile_count):
+                print("Detected stuck condition. Implementing progressive recovery...")
+                progressive_recovery(browser)
+                consecutive_no_profiles = 0
+                last_profile_count = len(visited_profiles)
+                continue
+            
             NavigateToHomePage(browser)
             time.sleep(2)
             soup = BeautifulSoup(browser.page_source, "html.parser")
             profile_links = extract_home_feed_profile_links(soup)
             new_profiles = [link for link in profile_links if link not in visited_profiles and link != own_profile_url]
+            
             if not new_profiles:
+                consecutive_no_profiles += 1
+                print(f"No new profiles found. Attempt {consecutive_no_profiles}/3")
                 ScrollToBottomAndWaitForLoad(browser)
                 continue
+            else:
+                consecutive_no_profiles = 0
+                last_profile_count = len(visited_profiles)
+            
             for profile_url in new_profiles:
-                if len(visited_profiles) >= MAX_PROFILE_VIEWS:
-                    print(f"Reached {MAX_PROFILE_VIEWS} profile views. Exiting gracefully.")
+                if len(visited_profiles) >= MAX_PROFILE_VIEWS or shutdown_requested:
+                    print(f"Reached {MAX_PROFILE_VIEWS} profile views or shutdown requested. Exiting gracefully.")
                     return
+                
                 print(f"Visiting profile: {profile_url}")
                 visited_profiles.add(profile_url)
+                last_profile_visit_time = time.time()
+                
                 browser.get('https://www.linkedin.com' + profile_url)
                 time.sleep(random.uniform(2, 3))
+                
                 # Extract and save profile data
                 profile_soup = BeautifulSoup(browser.page_source, "html.parser")
                 profile_data = extract_profile_data(profile_url, profile_soup)
                 save_profile_data(profile_data)
+                
                 browser.back()
                 time.sleep(2)
+            
             ScrollToBottomAndWaitForLoad(browser)
             print(f"Visited {len(visited_profiles)} unique profiles this session.")
+            
         except Exception as e:
             with open(error_log_path, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([datetime.now().isoformat(), str(e)])
             print(f"Error occurred: {e}. Logged to {error_log_path}")
-    print(f"Graceful shutdown after visiting {MAX_PROFILE_VIEWS} profiles.")
+            time.sleep(5)  # Wait before retrying
+    
+    print(f"Graceful shutdown after visiting {len(visited_profiles)} profiles.")
+
+
+def is_stuck(consecutive_no_profiles, last_profile_count):
+    """
+    Smart stuck detection: Check if the bot is stuck.
+    """
+    # Check if no new profiles found in multiple attempts
+    if consecutive_no_profiles >= 3:
+        return True
+    
+    # Check if no profiles visited in last 2 minutes
+    if time.time() - last_profile_visit_time > 120:
+        return True
+    
+    # Check if profile count hasn't increased
+    if len(visited_profiles) == last_profile_count and time.time() - last_profile_visit_time > 60:
+        return True
+    
+    return False
+
+
+def progressive_recovery(browser):
+    """
+    Progressive recovery strategy when stuck.
+    """
+    print("Step 1: Trying aggressive scrolling...")
+    for i in range(5):
+        ScrollToBottomAndWaitForLoad(browser)
+        time.sleep(2)
+    
+    print("Step 2: Refreshing the page...")
+    browser.refresh()
+    time.sleep(5)
+    
+    print("Step 3: Navigating to My Network and back...")
+    browser.get('https://www.linkedin.com/mynetwork/')
+    time.sleep(3)
+    browser.get('https://www.linkedin.com/feed/')
+    time.sleep(3)
+    
+    print("Recovery complete. Resuming normal operation...")
 
 
 def NavigateToHomePage(browser):
@@ -446,6 +560,7 @@ def extract_profile_data(profile_url, soup):
     """
     Extract profile data fields as specified in OUTPUT_FIELDS.
     """
+    from datetime import datetime
     data = {'url': 'https://www.linkedin.com' + profile_url}
     if 'name' in OUTPUT_FIELDS:
         name_tag = soup.find('h1')
@@ -462,6 +577,8 @@ def extract_profile_data(profile_url, soup):
         data['email'] = 'N/A'  # Email is not public on most profiles
     if 'phone' in OUTPUT_FIELDS:
         data['phone'] = 'N/A'  # Phone is not public on most profiles
+    if 'timestamp' in OUTPUT_FIELDS:
+        data['timestamp'] = datetime.now().isoformat()
     return data
 
 
